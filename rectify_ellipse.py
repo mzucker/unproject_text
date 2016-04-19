@@ -138,63 +138,108 @@ def optimize_conics(conics, p0):
 
 def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
 
+    # ignore this, just deal with edge-detected text
     pts = np.vstack(tuple(contours))
     warped, _ = warp_containing_points(img, pts, H)
     
     work = threshold(warped)
-    work = cv2.Canny(work, 10, 100)
+    text_edges = cv2.Canny(work, 10, 100)
 
+    # for the purposes of re-using this code, just assume text_edges is input
+
+    # generate a linspace of thetas
     thetas = np.linspace(-0.5*np.pi, 0.5*np.pi, ntheta+1)[:-1]
+
+    # rho is pixels per r bin in polar (theta, r) histogram
+    # irho is bins per pixel
     irho = 1.0/rho
 
-    h, w = work.shape
-    rmax = int(np.ceil(np.hypot(w, h)*irho))
+    # get height and width
+    h, w = text_edges.shape
 
-    hist = np.zeros((rmax, ntheta))
+    # maximum bin index is given by hypotenuse of (w, h) divided by pixels per bin
+    bin_max = int(np.ceil(np.hypot(w, h)*irho))
+
+    # initialize zeroed histogram height bin_max and width num theta
+    hist = np.zeros((bin_max, ntheta))
+
+    # let u and v be x and y coordinates (respectively) of non-zero
+    # pixels in edge map
     v, u = np.mgrid[0:h, 0:w]
-    v = v[work.view(bool)]
-    u = u[work.view(bool)]
+    v = v[text_edges.view(bool)]
+    u = u[text_edges.view(bool)]
 
+    # get center coordinates
     u0 = w*0.5
     v0 = h*0.5
 
+    # for each i and theta = thetas[i]
     for i, theta in enumerate(thetas):
-        r = (-(u-u0)*np.sin(theta) + (v-v0)*np.cos(theta))*irho + 0.5*rmax
-        assert( r.min() > 0 and r.max() < rmax )
-        bc = np.bincount((r + 0.5).astype(int))
+
+        # if writing in C, would have to write explicit loops:
+        #  - over pixels in edge image, add directly into histogram for each one
+        #  for each theta:
+        #
+        #    for each row:
+        #      for each col:
+        #        if edge(row, col)
+        #          accumulate in histogram
+        #
+        #    now get # nonzero pixels in hist
+
+        # for each nonzero edge pixel, compute bin in r direction from pixel location and cos/sin of theta
+        bin_idx =  ( (-(u-u0)*np.sin(theta) # x term
+                      + (v-v0)*np.cos(theta))*irho # y term, both divided by pixels per bin
+                     + 0.5*bin_max ) # offset for center pixel
+        
+        assert( bin_idx.min() >= 0 and bin_idx.max() < bin_max )
+
+        # 0.5 is for correct rounding here
+        #
+        # e.g. np.bincount([1, 1, 0, 3]) = [1, 2, 0, 1]
+        # returns count of each integer in the array
+
+        bc = np.bincount((bin_idx + 0.5).astype(int))
+
+        # push this into the histogram
         hist[:len(bc),i] = bc
 
-    stats = np.zeros((2, ntheta))
+    # could merge these two lines into the loop above if neede
+        
+    # number of nonzero pixels in each column
+    num_nonzero = (hist == 0).sum(axis=0)
 
-    for i in range(ntheta):
-        stats[0,i] = (hist[:,i] == 0).sum() # number of nonzero pixels in hough histogram
-        stats[1,i] = hist[:,i].sum() # total sum of histogram
+    # find the maximum number of nonzero pixels
+    best_theta_idx = num_nonzero.argmax()
 
-    # first key is total # zeros, second key is column sum 
-    idx = np.lexsort( (-stats[0,:], stats[1,:])  )
+    # actual detected theta - could just return this
+    theta = thetas[best_theta_idx]
 
-    debug_hist = (255*hist/hist.max()).astype('uint8')
-    debug_hist = cv2.cvtColor(debug_hist, cv2.COLOR_GRAY2RGB)
-    cv2.line(debug_hist, (idx[0],0), (idx[0],rmax), (255,0,0))
-    cv2.imwrite('debug1_histogram.png', debug_hist)
-    
-    theta = thetas[idx[0]]
-
-    p0 = np.array((u0, v0))
-    t = np.array((np.cos(theta), np.sin(theta)))
-
-    cv2.line(warped,
-             tuple(map(int, p0 - rho*rmax*t)),
-             tuple(map(int, p0 + rho*rmax*t)),
-             (255, 0, 0))
-
-    cv2.imwrite('debug2_prerotate.png', warped)
-                 
+    # compose with previous homography (Gibson & Brooke can skip this)
     RH = np.dot(rotation(-theta), H)
     
-    warped, _ = warp_containing_points(img, pts, RH)
-    cv2.imwrite('debug3_preskew.png', warped)
-    
+    if 1: # just debug visualization
+
+        debug_hist = (255*hist/hist.max()).astype('uint8')
+        debug_hist = cv2.cvtColor(debug_hist, cv2.COLOR_GRAY2RGB)
+        cv2.line(debug_hist, (best_theta_idx,0), (best_theta_idx,bin_max), (255,0,0))
+        cv2.imwrite('debug1_histogram.png', debug_hist)
+
+        p0 = np.array((u0, v0))
+        t = np.array((np.cos(theta), np.sin(theta)))
+
+        cv2.line(warped,
+                 tuple(map(int, p0 - rho*bin_max*t)),
+                 tuple(map(int, p0 + rho*bin_max*t)),
+                 (255, 0, 0))
+
+        cv2.imwrite('debug2_prerotate.png', warped)
+
+
+        warped, _ = warp_containing_points(img, pts, RH)
+        cv2.imwrite('debug3_preskew.png', warped)
+
+        
     return RH
 
 
