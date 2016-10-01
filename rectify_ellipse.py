@@ -5,6 +5,34 @@ import ellipse
 import scipy.optimize
 import matplotlib.pyplot as plt
 
+DEBUG_COUNT = 0
+
+def debug_show(name, src):
+
+    global DEBUG_COUNT
+    filename = 'debug{}_{}.png'.format(DEBUG_COUNT, name)
+
+    cv2.imwrite(filename, src)
+
+    DEBUG_COUNT += 1
+    h, w = src.shape[:2]
+
+    fx = w/1280.0
+    fy = h/700.0
+
+    f = 1.0/np.ceil(max(fx, fy))
+
+    print h, w, fy, fx, f
+
+    if f < 1.0:
+        img = cv2.resize(src, (0, 0), None, f, f, cv2.INTER_AREA)
+    else:
+        img = src.copy()
+
+    cv2.imshow('Display', img)
+    while cv2.waitKey(5) < 0: pass
+    
+
 def translation(x, y):
     return np.array([[1, 0, x], [0, 1, y], [0, 0, 1]], dtype=float)
 
@@ -116,7 +144,7 @@ def get_conics(img, contours, abs_area_cutoff=10.0, mean_area_cutoff=0.15):
         cv2.ellipse(display, (int(x0), int(y0)), (int(a), int(b)),
                     theta*180/np.pi, 0, 360, (0,0,255))
 
-    cv2.imwrite('debug0_conics.png', display)
+    debug_show('conics', display)
 
     contours = [contours[i].astype('float32') for i in idx]
 
@@ -223,7 +251,7 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
         debug_hist = (255*hist/hist.max()).astype('uint8')
         debug_hist = cv2.cvtColor(debug_hist, cv2.COLOR_GRAY2RGB)
         cv2.line(debug_hist, (best_theta_idx,0), (best_theta_idx,bin_max), (255,0,0))
-        cv2.imwrite('debug1_histogram.png', debug_hist)
+        debug_show('histogram', debug_hist)
 
         p0 = np.array((u0, v0))
         t = np.array((np.cos(theta), np.sin(theta)))
@@ -233,11 +261,11 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
                  tuple(map(int, p0 + rho*bin_max*t)),
                  (255, 0, 0))
 
-        cv2.imwrite('debug2_prerotate.png', warped)
+        debug_show('prerotate', warped)
 
 
         warped, _ = warp_containing_points(img, pts, RH)
-        cv2.imwrite('debug3_preskew.png', warped)
+        debug_show('preskew', warped)
 
         
     return RH
@@ -254,11 +282,13 @@ def skew_detect(img, contours, RH):
     SRH = np.dot(slant(res.x), RH)
     warped, Hfinal = warp_containing_points(img, pts, SRH)
 
-    cv2.imwrite('debug4_final.png', warped)
+    debug_show('final', warped)
 
     return SRH
     
 img = cv2.imread(sys.argv[1])
+debug_show('input', img)
+
 contours = get_contours(img)
 
 conics, contours, centroid = get_conics(img, contours)
