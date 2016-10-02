@@ -1,28 +1,21 @@
-import numpy as np
-import cv2
 import sys
-import ellipse
+import numpy as np
 import scipy.optimize
-import matplotlib.pyplot as plt
+import cv2
+import ellipse
 
-DEBUG_COUNT = 0
+def debug_show(index, name, src):
 
-def debug_show(name, src):
-
-    global DEBUG_COUNT
-    filename = 'debug{}_{}.png'.format(DEBUG_COUNT, name)
+    filename = 'debug{}_{}.png'.format(index, name)
 
     cv2.imwrite(filename, src)
 
-    DEBUG_COUNT += 1
     h, w = src.shape[:2]
 
     fx = w/1280.0
     fy = h/700.0
 
     f = 1.0/np.ceil(max(fx, fy))
-
-    print h, w, fy, fx, f
 
     if f < 1.0:
         img = cv2.resize(src, (0, 0), None, f, f, cv2.INTER_AREA)
@@ -31,7 +24,6 @@ def debug_show(name, src):
 
     cv2.imshow('Display', img)
     while cv2.waitKey(5) < 0: pass
-    
 
 def translation(x, y):
     return np.array([[1, 0, x], [0, 1, y], [0, 0, 1]], dtype=float)
@@ -130,8 +122,9 @@ def get_conics(img, contours, abs_area_cutoff=10.0, mean_area_cutoff=0.15):
     areas = np.array(areas)
     amean = areas.mean()
 
-    print 'got', len(areas), 'contours with',  (areas < mean_area_cutoff*amean).sum(), 'small.'
-
+    print 'got {} contours with {} small.'.format(
+        len(areas), (areas < mean_area_cutoff*amean).sum())
+    
     idx = np.where(areas > mean_area_cutoff*amean)[0]
 
     conics = np.array(conics)
@@ -140,11 +133,11 @@ def get_conics(img, contours, abs_area_cutoff=10.0, mean_area_cutoff=0.15):
 
     display = img.copy()
     for conic in conics:
-        x0, y0, a, b, theta = tuple(ellipse.params_from_conic(conic))
+        x0, y0, a, b, theta = ellipse.gparams_from_conic(conic)
         cv2.ellipse(display, (int(x0), int(y0)), (int(a), int(b)),
                     theta*180/np.pi, 0, 360, (0,0,255))
 
-    debug_show('conics', display)
+    debug_show(1, 'conics', display)
 
     contours = [contours[i].astype('float32') for i in idx]
 
@@ -158,7 +151,8 @@ def optimize_conics(conics, p0):
     
     f = lambda x: conic_area_discrepancy(conics, hfunc(x))
     
-    res = scipy.optimize.minimize(f, x0, method='Powell')
+    with np.errstate(divide='ignore',invalid='ignore'):
+        res = scipy.optimize.minimize(f, x0, method='Powell')
 
     H = hfunc(res.x)
 
@@ -173,10 +167,8 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
     work = threshold(warped)
     text_edges = cv2.Canny(work, 10, 100)
 
-    # for the purposes of re-using this code, just assume text_edges is input
-
     # generate a linspace of thetas
-    thetas = np.linspace(-0.5*np.pi, 0.5*np.pi, ntheta+1)[:-1]
+    thetas = np.linspace(-0.5*np.pi, 0.5*np.pi, ntheta, endpoint=False)
 
     # rho is pixels per r bin in polar (theta, r) histogram
     # irho is bins per pixel
@@ -204,20 +196,12 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
     # for each i and theta = thetas[i]
     for i, theta in enumerate(thetas):
 
-        # if writing in C, would have to write explicit loops:
-        #  - over pixels in edge image, add directly into histogram for each one
-        #  for each theta:
-        #
-        #    for each row:
-        #      for each col:
-        #        if edge(row, col)
-        #          accumulate in histogram
-        #
-        #    now get # nonzero pixels in hist
-
-        # for each nonzero edge pixel, compute bin in r direction from pixel location and cos/sin of theta
+        # for each nonzero edge pixel, compute bin in r direction from
+        # pixel location and cos/sin of theta
         bin_idx =  ( (-(u-u0)*np.sin(theta) # x term
-                      + (v-v0)*np.cos(theta))*irho # y term, both divided by pixels per bin
+                      + (v-v0)*np.cos(theta))*irho # y term, both
+                                                   # divided by pixels
+                                                   # per bin
                      + 0.5*bin_max ) # offset for center pixel
         
         assert( bin_idx.min() >= 0 and bin_idx.max() < bin_max )
@@ -232,26 +216,28 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
         # push this into the histogram
         hist[:len(bc),i] = bc
 
-    # could merge these two lines into the loop above if neede
-        
-    # number of nonzero pixels in each column
-    num_nonzero = (hist == 0).sum(axis=0)
+    # number of zero pixels in each column
+    num_zero = (hist == 0).sum(axis=0)
 
-    # find the maximum number of nonzero pixels
-    best_theta_idx = num_nonzero.argmax()
+    # find the maximum number of zero pixels
+    best_theta_idx = num_zero.argmax()
 
-    # actual detected theta - could just return this
+    # actual detected theta - could just return this now
     theta = thetas[best_theta_idx]
 
-    # compose with previous homography (Gibson & Brooke can skip this)
+    # compose with previous homography 
     RH = np.dot(rotation(-theta), H)
     
     if 1: # just debug visualization
 
         debug_hist = (255*hist/hist.max()).astype('uint8')
         debug_hist = cv2.cvtColor(debug_hist, cv2.COLOR_GRAY2RGB)
-        cv2.line(debug_hist, (best_theta_idx,0), (best_theta_idx,bin_max), (255,0,0))
-        debug_show('histogram', debug_hist)
+
+        cv2.line(debug_hist,
+                 (best_theta_idx, 0),
+                 (best_theta_idx, bin_max), (255,0,0))
+        
+        debug_show(2, 'histogram', debug_hist)
 
         p0 = np.array((u0, v0))
         t = np.array((np.cos(theta), np.sin(theta)))
@@ -261,12 +247,10 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
                  tuple(map(int, p0 + rho*bin_max*t)),
                  (255, 0, 0))
 
-        debug_show('prerotate', warped)
-
+        debug_show(3, 'prerotate', warped)
 
         warped, _ = warp_containing_points(img, pts, RH)
-        debug_show('preskew', warped)
-
+        debug_show(4, 'preskew', warped)
         
     return RH
 
@@ -282,20 +266,22 @@ def skew_detect(img, contours, RH):
     SRH = np.dot(slant(res.x), RH)
     warped, Hfinal = warp_containing_points(img, pts, SRH)
 
-    debug_show('final', warped)
+    debug_show(5, 'final', warped)
 
     return SRH
-    
-img = cv2.imread(sys.argv[1])
-debug_show('input', img)
 
-contours = get_contours(img)
+def main():
 
-conics, contours, centroid = get_conics(img, contours)
-H = optimize_conics(conics, centroid)
-RH = orientation_detect(img, contours, H)
-SRH = skew_detect(img, contours, RH)
+    img = cv2.imread(sys.argv[1])
+    debug_show(0, 'input', img)
 
+    contours = get_contours(img)
 
+    conics, contours, centroid = get_conics(img, contours)
+    H = optimize_conics(conics, centroid)
+    RH = orientation_detect(img, contours, H)
+    SRH = skew_detect(img, contours, RH)
 
+if __name__ == '__main__':
+    main()
 
