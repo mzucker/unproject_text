@@ -1,6 +1,6 @@
-# rectify_ellipse
+# unproject_text
 Rectification of text with conic sections
 
 Try running
 
-    python rectify_ellipse.py deskew2.png
+    python unproject_text.py deskew2.png
