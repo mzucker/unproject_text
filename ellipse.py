@@ -58,22 +58,9 @@ and the three second order central moments (mu₂₀, mu₁₁, mu₀₂).
 # pylint: disable=R0914
 # pylint: disable=E1101
 
+from __future__ import print_function
+
 import numpy
-
-def eigh_2x2(x, y, z):
-
-    '''Computes the eigenvalues and eigenvectors of a 2x2 hermitian matrix
-whose entries are [[x,y],[y,z]].'''
-
-    q = numpy.sqrt(z**2 - 2*x*z + 4*y**2 + x**2)
-
-    w = numpy.array([0.5 * (z + x - q),
-                     0.5 * (z + x + q)])
-
-    V = numpy.array([[2*y, 2*y],
-                     [(z-x-q), (z-x+q)]])
-
-    return w, V
 
 def _params_str(names, params):
 
@@ -121,31 +108,73 @@ def gparams_from_conic(conic):
     if numpy.isinf(ab):
         return None
 
-    A, B, C, D, E, _ = tuple(conic)
+    A, B, C, D, E, F = tuple(conic)
 
-    x0 = (B*E - 2*C*D)/(4*A*C - B**2)
-    y0 = (-2*A*E + B*D)/(4*A*C - B**2)
+    T = B**2 - 4*A*C
+    
+    x0 = (2*C*D - B*E)/T
+    y0 = (2*A*E - B*D)/T
 
-    w, V = eigh_2x2(A, 0.5*B, C)
+    S = A*E**2 + C*D**2 - B*D*E + (B**2 - 4*A*C)*F
+    U = numpy.sqrt((A - C)**2 + B**2)
 
-    b, a = tuple(numpy.sqrt(w/k))
-    theta = numpy.arctan2(-V[0, 1], V[1, 1])
+    a = -numpy.sqrt(2*S*(A+C+U))/T
+    b = -numpy.sqrt(2*S*(A+C-U))/T
 
+    theta = numpy.arctan2(C-A-U, B)
+    
     return numpy.array((x0, y0, a, b, theta))
 
-def gparams_from_moments(m):
+def _gparams_sincos_from_moments(m):
 
-    '''Convert the given moment parameters to geometric ellipse parameters.'''
+    '''Convert from moments to canonical parameters, except postpone the
+    final arctan until later. Formulas determined largely by trial and
+    error.
+
+    '''
 
     m00, m10, m01, mu20, mu11, mu02 = tuple(m)
 
     x0 = m10 / m00
     y0 = m01 / m00
 
-    w, V = eigh_2x2(mu20/m00, mu11/m00, mu02/m00)
+    A = 4*mu02/m00
+    B = -8*mu11/m00
+    C = 4*mu20/m00
 
-    b, a = tuple(2.0*numpy.sqrt(w))
-    theta = numpy.arctan2(V[0, 0], -V[1, 0])
+    U = numpy.sqrt((A - C)**2 + B**2)
+    T = B**2 - 4*A*C
+    S = 1.0
+
+    a = -numpy.sqrt(2*S*(A+C+U))/T
+    b = -numpy.sqrt(2*S*(A+C-U))/T
+
+    # we want a * b * pi = m00
+    #
+    # so if we are off by some factor, we should scale a and b by this factor
+    #
+    # we need to fix things up somehow because moments have 6 DOF and
+    # ellipse has only 5.
+    area = numpy.pi * a * b
+    scl = numpy.sqrt(m00 / area)
+    a *= scl
+    b *= scl
+
+    sincos = numpy.array([C-A-U, B])
+    sincos /= numpy.linalg.norm(sincos)
+
+    s, c = sincos
+
+    return numpy.array((x0, y0, a, b, s, c))
+
+def gparams_from_moments(m):
+
+    '''Convert the given moment parameters to geometric ellipse parameters.
+    Formula derived through trial and error.'''
+
+    x0, y0, a, b, s, c = _gparams_sincos_from_moments(m)
+    
+    theta = numpy.arctan2(s, c)
 
     return numpy.array((x0, y0, a, b, theta))
 
@@ -180,6 +209,7 @@ describe an ellipse, then this returns infinity, infinity.
 
     if not S:
         return numpy.inf, numpy.inf
+
 
     k = 0.25*T**2/S
     ab = 2.0*S/(T*numpy.sqrt(T))
@@ -229,6 +259,19 @@ https://en.wikipedia.org/wiki/Matrix_representation_of_conic_sections).
 
     return numpy.array((A, B, C, D, E, F))
 
+def _conic_from_gparams_sincos(gparams_sincos):
+
+    x0, y0, a, b, s, c = gparams_sincos
+    
+    A = a**2 * s**2 + b**2 * c**2
+    B = 2*(b**2 - a**2) * s * c
+    C = a**2 * c**2 + b**2 * s**2
+    D = -2*A*x0 - B*y0
+    E = -B*x0 - 2*C*y0
+    F = A*x0**2 + B*x0*y0 + C*y0**2 - a**2*b**2
+
+    return numpy.array((A, B, C, D, E, F))
+
 def conic_from_gparams(gparams):
 
     '''Convert geometric parameters to conic parameters. Formulas from
@@ -240,36 +283,13 @@ https://en.wikipedia.org/wiki/Ellipse#General_ellipse.
     c = numpy.cos(theta)
     s = numpy.sin(theta)
 
-    A = a**2 * s**2 + b**2 * c**2
-    B = 2*(b**2 - a**2) * s * c
-    C = a**2 * c**2 + b**2 * s**2
-    D = -2*A*x0 - B*y0
-    E = -B*x0 - 2*C*y0
-    F = A*x0**2 + B*x0*y0 + C*y0**2 - a**2*b**2
-
-    return numpy.array((A, B, C, D, E, F))
+    return _conic_from_gparams_sincos((x0, y0, a, b, s, c))
 
 def conic_from_moments(moments):
 
-    '''Convert shape moments to conic parameters. Formulas derived through
-trial and error.'''
-
-    m00, m10, m01, mu20, mu11, mu02 = tuple(moments)
-
-    x0 = m10/m00
-    y0 = m01/m00
-
-    A = 4*mu02/m00
-    B = -8*mu11/m00
-    C = 4*mu20/m00
-
-    a2b2 = 0.25*(4*A*C - B*B)
-
-    D = -2*A*x0 - B*y0
-    E = -B*x0 - 2*C*y0
-    F = A*x0**2 + B*x0*y0 + C*y0**2 - a2b2
-
-    return numpy.array((A, B, C, D, E, F))
+    g = _gparams_sincos_from_moments(moments)
+    
+    return _conic_from_gparams_sincos(g)
 
 ######################################################################
 
@@ -284,6 +304,7 @@ def moments_from_dict(m):
 def moments_str(m):
     '''Convert shape moments to nice printable string.'''
     return _params_str(MOMENTS_DISPLAY_NAMES, m)
+
 
 def moments_from_gparams(gparams):
 
@@ -350,32 +371,6 @@ def _perspective_transform(pts, H):
 
 def _test_ellipse():
 
-    '''Run some basic unit tests for this module.'''
-
-    ##################################################
-    # test eigh_2x2
-
-    print 'testing eigh_2x2 on a bunch of random 2x2 matrices...'
-
-    for _ in range(100):
-        theta = numpy.random.random()*2*numpy.pi
-        a = numpy.random.random()*9 + 1
-        b = numpy.random.random()*9 + 1
-        a, b = max(a, b), min(a, b)
-        c = numpy.cos(theta)
-        s = numpy.sin(theta)
-        R = numpy.array([[c, -s], [s, c]])
-        A = numpy.dot(R, numpy.dot(numpy.diag([a, b]), R.T))
-        assert numpy.allclose(A[1, 0], A[0, 1])
-        w, V = eigh_2x2(A[0, 0], A[0, 1], A[1, 1])
-        AA = numpy.dot(V, numpy.dot(numpy.diag(w), numpy.linalg.inv(V)))
-        assert numpy.allclose(w, [b, a])
-        assert numpy.allclose(A, AA)
-
-    print '...it worked!'
-    print
-
-
     # test that we can go from conic to geometric and back
     x0 = 450
     y0 = 320
@@ -401,8 +396,9 @@ def _test_ellipse():
     implicit_max = numpy.abs(implicit_output).max()
 
     # ensure implicit evaluates near 0 everywhere
-    print 'max item from implicit: {} (should be close to 0)'.format(implicit_max)
-    print
+    print('max item from implicit: {} (should be close to 0)'.format(implicit_max))
+    print()
+    
     assert implicit_max < 1e-5
 
     # ensure that scaled_conic has the scale we expect
@@ -411,20 +407,20 @@ def _test_ellipse():
 
     k2, ab2 = conic_scale(scaled_conic)
 
-    print 'these should all be equal:'
-    print
-    print '  k  =', k
-    print '  k2 =', k2
+    print('these should all be equal:')
+    print()
+    print('  k  =', k)
+    print('  k2 =', k2)
     assert numpy.allclose((k2, ab2), (k, a*b))
-    print
+    print()
 
     # convert the scaled conic back to geometric parameters
     gparams2 = gparams_from_conic(scaled_conic)
 
-    print '  gparams  =', gparams_str(gparams)
+    print('  gparams  =', gparams_str(gparams))
 
     # ensure that converting back from scaled conic to geometric params is correct
-    print '  gparams2 =', gparams_str(gparams2)
+    print('  gparams2 =', gparams_str(gparams2))
     assert numpy.allclose(gparams, gparams2)
 
     # convert original geometric parameters to moments
@@ -433,16 +429,16 @@ def _test_ellipse():
     gparams3 = gparams_from_moments(m)
 
     # ensure that converting back from moments to geometric params is correct
-    print '  gparams3 =', gparams_str(gparams3)
-    print
+    print('  gparams3 =', gparams_str(gparams3))
+    print()
     assert numpy.allclose(gparams, gparams3)
 
     # convert moments parameterization to conic
     conic2 = conic_from_moments(m)
 
     # ensure that converting from moments to conics is correct
-    print '  conic  =', conic_str(conic)
-    print '  conic2 =', conic_str(conic2)
+    print('  conic  =', conic_str(conic))
+    print('  conic2 =', conic_str(conic2))
     assert numpy.allclose(conic, conic2)
 
     # create conic from homogeneous least squares fit of points
@@ -457,18 +453,18 @@ def _test_ellipse():
     conic3 /= k3
 
     # ensure that conic from HLS fit is same as other 2
-    print '  conic3 =', conic_str(conic3)
-    print
+    print('  conic3 =', conic_str(conic3))
+    print()
     assert numpy.allclose(conic, conic3)
 
     # convert from conic to moments
     m2 = moments_from_conic(scaled_conic)
 
-    print '  m  =', moments_str(m)
+    print('  m  =', moments_str(m))
 
     # ensure that conics->moments yields the same result as geometric
     # params -> moments.
-    print '  m2 =', moments_str(m2)
+    print('  m2 =', moments_str(m2))
     assert numpy.allclose(m, m2)
 
     from moments_from_contour import moments_from_contour
@@ -479,8 +475,8 @@ def _test_ellipse():
 
     # ensure that moments from contour is reasonably close to moments
     # from geometric params.
-    print '  m3 =', moments_str(m3)
-    print
+    print('  m3 =', moments_str(m3))
+    print()
     assert numpy.allclose(m3, m, 1e-4, 1e-4)
 
     # create a homography H to map the ellipse through
@@ -517,9 +513,9 @@ def _test_ellipse():
     Hconic2 /= Hk2
 
     # ensure that the two conics are equal
-    print '  Hconic  =', conic_str(Hconic)
-    print '  Hconic2 =', conic_str(Hconic2)
-    print
+    print('  Hconic  =', conic_str(Hconic))
+    print('  Hconic2 =', conic_str(Hconic2))
+    print()
     assert numpy.allclose(Hconic, Hconic2)
 
     # get the moments from Hconic
@@ -529,20 +525,20 @@ def _test_ellipse():
     Hm2 = moments_from_contour(Hpts)
 
     # ensure that the two moments are close enough
-    print '  Hm  =', moments_str(Hm)
-    print '  Hm2 =', moments_str(Hm2)
-    print
+    print('  Hm  =', moments_str(Hm))
+    print('  Hm2 =', moments_str(Hm2))
+    print()
     assert numpy.allclose(Hm, Hm2, 1e-4, 1e-4)
 
     # tests complete, now visualize
-    print 'all tests passed!'
+    print('all tests passed!')
 
     try:
         import cv2
-        print 'visualizing results...'
+        print('visualizing results...')
     except ImportError:
         import sys
-        print 'not visualizing results since module cv2 not found'
+        print('not visualizing results since module cv2 not found')
         sys.exit(0)
 
     shift = 3
@@ -591,7 +587,7 @@ def _test_ellipse():
 
     cv2.imshow('win', display)
 
-    print 'click in the display window & hit any key to quit.'
+    print('click in the display window & hit any key to quit.')
 
     while cv2.waitKey(5) < 0:
         pass

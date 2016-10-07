@@ -1,13 +1,22 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import unicode_literals, print_function
+
 import sys
 import numpy as np
 import scipy.optimize
+import matplotlib.pyplot as plt
 import cv2
 import ellipse
 
-def debug_show(index, name, src):
+DEBUG_IMAGES = []
 
-    filename = 'debug{}_{}.png'.format(index, name)
+def debug_show(name, src):
 
+    global DEBUG_IMAGES
+
+    filename = 'debug{:02d}_{}.png'.format(len(DEBUG_IMAGES), name)
     cv2.imwrite(filename, src)
 
     h, w = src.shape[:2]
@@ -22,8 +31,7 @@ def debug_show(index, name, src):
     else:
         img = src.copy()
 
-    cv2.imshow('Display', img)
-    while cv2.waitKey(5) < 0: pass
+    DEBUG_IMAGES.append(img)
 
 def translation(x, y):
     return np.array([[1, 0, x], [0, 1, y], [0, 0, 1]], dtype=float)
@@ -53,14 +61,28 @@ def centered_warp(u0, v0, a, b):
                   np.dot(perspective_warp(a, b),
                          translation(-u0, -v0)))
 
-def warp_containing_points(img, pts, H, border=4):
+def warp_containing_points(img, pts, H, border=4, shape_only=False):
+
+    '''
+    display = img.copy()
+    for pt in pts.reshape((-1,2)).astype(int):
+        cv2.circle(display, tuple(pt), 4, (255, 0, 0),
+                   -1, cv2.LINE_AA)
+    debug_show('warp', display)
+    '''
+    
     pts2 = cv2.perspectiveTransform(pts, H)
     x0, y0, w, h = cv2.boundingRect(pts2)
+    print('got bounding rect', x0, y0, w, h)
     T = translation(-x0+border, -y0+border)
     TH = np.dot(T, H)
-    dst = cv2.warpPerspective(img, TH, (w+2*border, h+2*border),
-                              borderMode=cv2.BORDER_REPLICATE)
-    return dst, TH 
+
+    if shape_only:
+        return (h+2*border, w+2*border), TH
+    else:
+        dst = cv2.warpPerspective(img, TH, (w+2*border, h+2*border),
+                                  borderMode=cv2.BORDER_REPLICATE)
+        return dst, TH 
 
 def conic_area_discrepancy(conics, H):
 
@@ -83,6 +105,10 @@ def threshold(img):
     
     if len(img.shape) > 2:
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+    mean = img.mean()
+    if mean < 100:
+        img = 255-img
         
     return cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
                                  cv2.THRESH_BINARY_INV, 101, 21)
@@ -91,57 +117,152 @@ def get_contours(img):
 
     work = threshold(img)
 
-    if cv2.__version__[0] == '3':
-        _, contours, _ = cv2.findContours(work, cv2.RETR_EXTERNAL,
-                                          cv2.CHAIN_APPROX_SIMPLE)
-    else:
-        contours = cv2.findContours(work, cv2.RETR_EXTERNAL,
-                                    cv2.CHAIN_APPROX_SIMPLE)[0]
+    debug_show('threshold', work)
 
-    return contours
+    _, contours, hierarchy = cv2.findContours(work, cv2.RETR_CCOMP,
+                                              cv2.CHAIN_APPROX_NONE)
 
-def get_conics(img, contours, abs_area_cutoff=10.0, mean_area_cutoff=0.15):
+    return contours, hierarchy
+
+def get_conics(img, contours, hierarchy,
+               abs_area_cutoff=0.0001, mean_area_cutoff=0.15):
+
+    hierarchy = hierarchy.reshape((-1, 4))
 
     conics = []
     used_contours = []
     areas = []
+    okcontours = []
+    allchildren = []
     pts = np.empty((0,1,2), dtype='float32')
-    centroid = np.zeros(2)
+    centroid_accum = np.zeros(2)
     total_area = 0.0
 
-    for c in contours:
-        m = ellipse.moments_from_dict(cv2.moments(c))
-        if m[0] > abs_area_cutoff:
-            centroid += m[1:3]
-            total_area += m[0]
-            pts = np.vstack((pts, c.astype('float32')))
-            conic = ellipse.conic_from_moments(m)
-            conics.append(conic)
-            areas.append(m[0])
+    centroids = []
 
+    abs_area_cutoff *= img.shape[0] * img.shape[1]
+    print('abs_area_cutoff = ',abs_area_cutoff)
+
+    for i, (c, h) in enumerate(zip(contours, hierarchy.reshape((-1, 4)))):
+
+        next_idx, prev_idx, child_idx, parent_idx = h
+
+        if parent_idx >= 0:
+            continue
+
+        m = ellipse.moments_from_dict(cv2.moments(c))
+
+        if m[0] <= abs_area_cutoff:
+            continue
+
+        children = []
+
+        while child_idx >= 0:
+            child_contour = contours[child_idx]
+            cm = cv2.moments(child_contour)
+            if cm['m00'] > abs_area_cutoff:
+                children.append(child_contour)
+                allchildren.append(child_contour)
+            child_idx = hierarchy[child_idx][0]
+
+        if children:
+            work = np.zeros(img.shape[:2], dtype=np.uint8)
+            cv2.drawContours(work, contours, i, (1,1,1), -1)
+            cv2.drawContours(work, children, -1, (0,0,0), -1)
+            m = ellipse.moments_from_dict(cv2.moments(work, True))
+
+        centroids.append(m[1:3]/m[0])
+        centroid_accum += m[1:3]
+        total_area += m[0]
+        pts = np.vstack((pts, c.astype('float32')))
+        conic = ellipse.conic_from_moments(m)
+        okcontours.append(c)
+        conics.append(conic)
+        areas.append(m[0])
+
+    display = img.copy()
+    cv2.drawContours(display, okcontours+allchildren,
+                     -1, (0, 255, 0),
+                     6, cv2.LINE_AA)
+    
+    debug_show('contours_only', display)
+
+    for c, a in zip(okcontours, areas):
+
+        x, y, w, h = cv2.boundingRect(c)
+
+        
+        s = str('{:,d}'.format(int(a)))
+        #ctr = (x + w/2 - 15*len(s), y+h/2+10)
+        ctr = (x, y+h+20)
+        
+        cv2.putText(display, s, ctr,
+                    cv2.FONT_HERSHEY_SIMPLEX, 2.0,
+                    (0, 0, 0), 12, cv2.LINE_AA)
+
+        cv2.putText(display, s, ctr,
+                    cv2.FONT_HERSHEY_SIMPLEX, 2.0,
+                    (0, 255, 0), 6, cv2.LINE_AA)
+
+    debug_show('contours', display)
+        
     areas = np.array(areas)
     amean = areas.mean()
 
-    print 'got {} contours with {} small.'.format(
-        len(areas), (areas < mean_area_cutoff*amean).sum())
+    print('got {} contours with {} small.'.format(
+        len(areas), (areas < mean_area_cutoff*amean).sum()))
     
     idx = np.where(areas > mean_area_cutoff*amean)[0]
 
     conics = np.array(conics)
     conics = conics[idx]
-    centroid /= total_area
+    centroid_accum /= total_area
 
     display = img.copy()
     for conic in conics:
         x0, y0, a, b, theta = ellipse.gparams_from_conic(conic)
         cv2.ellipse(display, (int(x0), int(y0)), (int(a), int(b)),
-                    theta*180/np.pi, 0, 360, (0,0,255))
+                    theta*180/np.pi, 0, 360, (0,0,255), 6, cv2.LINE_AA)
 
-    debug_show(1, 'conics', display)
+    debug_show('conics', display)
 
-    contours = [contours[i].astype('float32') for i in idx]
+    contours = [okcontours[i].astype('float32') for i in idx]
 
-    return conics, contours, centroid
+    if 0:
+
+        centroids = np.array([centroids[i] for i in idx])
+        areas = areas[idx]
+
+        def polyfit(x, y):
+            coeffs = np.polyfit(x, y, deg=1)
+            ypred = np.polyval(coeffs, x)
+            ymean = np.mean(y)
+            sstot = np.sum((y - ymean)**2)
+            ssres = np.sum((y.flatten() - ypred.flatten())**2)
+            r2 = 1 - ssres/sstot
+            return coeffs, r2
+
+        xfit, xr2 = polyfit(centroids[:,0], areas)
+        yfit, yr2 = polyfit(centroids[:,1], areas)
+
+        xlabel = 'X coordinate (r²={:.2f})'.format(xr2)
+        ylabel = 'Y coordinate (r²={:.2f})'.format(yr2)
+
+        plt.plot(centroids[:,0], areas, 'b.', zorder=1)
+        plt.plot(centroids[:,1], areas, 'r.', zorder=1)
+        plt.gca().autoscale(False)
+        plt.plot([0, 3000], np.polyval(xfit, [0,3000]), 'b--',
+                 zorder=0, label=xlabel)
+        plt.plot([0, 3000], np.polyval(yfit, [0,3000]), 'r--',
+                 zorder=0, label=ylabel)
+        plt.legend(loc='upper right')
+        plt.xlabel('X/Y coordinate (px)')
+        plt.ylabel('Contour area (px²)')
+        plt.savefig('position-vs-area.pdf')
+
+
+
+    return conics, contours, centroid_accum
 
 def optimize_conics(conics, p0):
 
@@ -158,14 +279,21 @@ def optimize_conics(conics, p0):
 
     return H
 
-def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
+def orientation_detect(img, contours, H, rho=8.0, ntheta=512):
 
     # ignore this, just deal with edge-detected text
+
     pts = np.vstack(tuple(contours))
-    warped, _ = warp_containing_points(img, pts, H)
     
-    work = threshold(warped)
-    text_edges = cv2.Canny(work, 10, 100)
+    shape, TH = warp_containing_points(img, pts, H, shape_only=True)
+
+    text_edges = np.zeros(shape, dtype=np.uint8)
+
+    for contour in contours:
+        contour = cv2.perspectiveTransform(contour.astype(np.float32), TH)
+        cv2.drawContours(text_edges, [contour.astype(int)], 0, (255,255,255))
+        
+    debug_show('edges', text_edges)
 
     # generate a linspace of thetas
     thetas = np.linspace(-0.5*np.pi, 0.5*np.pi, ntheta, endpoint=False)
@@ -235,22 +363,27 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=256):
 
         cv2.line(debug_hist,
                  (best_theta_idx, 0),
-                 (best_theta_idx, bin_max), (255,0,0))
+                 (best_theta_idx, bin_max), (255,0,0),
+                 1, cv2.LINE_AA)
         
-        debug_show(2, 'histogram', debug_hist)
+        debug_show('histogram', debug_hist)
 
         p0 = np.array((u0, v0))
         t = np.array((np.cos(theta), np.sin(theta)))
 
+        warped = cv2.warpPerspective(img, TH, (shape[1], shape[0]),
+                                     borderMode=cv2.BORDER_REPLICATE)
+
         cv2.line(warped,
                  tuple(map(int, p0 - rho*bin_max*t)),
                  tuple(map(int, p0 + rho*bin_max*t)),
-                 (255, 0, 0))
+                 (255, 0, 0),
+                 6, cv2.LINE_AA)
 
-        debug_show(3, 'prerotate', warped)
+        debug_show('prerotate', warped)
 
         warped, _ = warp_containing_points(img, pts, RH)
-        debug_show(4, 'preskew', warped)
+        debug_show('preskew', warped)
         
     return RH
 
@@ -266,21 +399,26 @@ def skew_detect(img, contours, RH):
     SRH = np.dot(slant(res.x), RH)
     warped, Hfinal = warp_containing_points(img, pts, SRH)
 
-    debug_show(5, 'final', warped)
+    debug_show('final', warped)
 
     return SRH
 
 def main():
 
     img = cv2.imread(sys.argv[1])
-    debug_show(0, 'input', img)
+    debug_show('input', img)
 
-    contours = get_contours(img)
+    contours, hierarchy = get_contours(img)
 
-    conics, contours, centroid = get_conics(img, contours)
+    conics, contours, centroid = get_conics(img, contours, hierarchy)
     H = optimize_conics(conics, centroid)
     RH = orientation_detect(img, contours, H)
     SRH = skew_detect(img, contours, RH)
+
+    for img in DEBUG_IMAGES:
+        cv2.imshow('Debug', img)
+        while cv2.waitKey(5) < 0:
+            pass
 
 if __name__ == '__main__':
     main()
