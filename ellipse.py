@@ -368,8 +368,41 @@ def _perspective_transform(pts, H):
 
     return pts.reshape((-1, 1, 2))
 
+def _test_moments():
+
+    # so I just realized that moments have actually 6 DOF but all
+    # ellipse parameterizations have 5, therefore information is lost
+    # when going back and forth.
+    
+    m = numpy.array([59495.5, 5.9232e+07, 1.84847e+07, 3.34079e+08, -1.94055e+08, 3.74633e+08])
+    gp = gparams_from_moments(m)
+    
+    m2 = moments_from_gparams(gp)
+    gp2 = gparams_from_moments(m2)
+
+    c = conic_from_moments(m)
+    m3 = moments_from_conic(c)
+
+    assert numpy.allclose(gp, gp2)
+    assert numpy.allclose(m2, m3)
+
+    print('here is the first thing:')
+    print('  {}'.format(moments_str(m)))
+    print()
+    print('the rest should all be equal pairs:')
+    print('  {}'.format(moments_str(m2)))
+    print('  {}'.format(moments_str(m3)))
+    print()
+    print('  {}'.format(gparams_str(gp)))
+    print('  {}'.format(gparams_str(gp2)))
+    print()
+
 
 def _test_ellipse():
+
+    print('testing moments badness')
+    _test_moments()
+    print('pass')
 
     # test that we can go from conic to geometric and back
     x0 = 450
