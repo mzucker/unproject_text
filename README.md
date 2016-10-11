@@ -3,4 +3,4 @@ Rectification of text with conic sections
 
 Try running
 
-    python unproject_text.py deskew2.png
+    python unproject_text.py deskew0.png

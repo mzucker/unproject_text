@@ -47,6 +47,10 @@ def perspective_warp(a, b):
 def slant(sx):
     return np.array([[1, sx, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
 
+def softmax(x, k=1.0):
+    b = x.max()
+    return np.log( np.exp(k*(x-b)).sum() ) / k + b
+
 def skewed_widths(contours, H):
     xvals = []
     for c in contours:
@@ -54,7 +58,7 @@ def skewed_widths(contours, H):
         x = pts[:,:,0]
         xvals.append( x.max() - x.min() )
     xvals = np.array(xvals)
-    return np.sum(xvals)
+    return softmax(xvals, 0.1)
 
 def centered_warp(u0, v0, a, b):
     return np.dot(translation(u0, v0),
@@ -84,7 +88,7 @@ def warp_containing_points(img, pts, H, border=4, shape_only=False):
                                   borderMode=cv2.BORDER_REPLICATE)
         return dst, TH 
 
-def conic_area_discrepancy(conics, H):
+def conic_area_discrepancy(conics, x, H, opt_results=None):
 
     areas = []
     
@@ -92,14 +96,22 @@ def conic_area_discrepancy(conics, H):
         cx = ellipse.conic_transform(conic, H)
         k, ab = ellipse.conic_scale(cx)
         if np.isinf(ab):
-            return np.inf
-        areas.append(ab)
+            areas.append(1e20)
+        else:
+            areas.append(ab)
 
     areas = np.array(areas)
-    areas /= areas.mean()
+    
+    areas /= areas.mean() # rescale so mean is 1.0
     areas -= 1 # subtract off mean
     
-    return 0.5*np.dot(areas, areas)
+    rval = 0.5*np.dot(areas, areas)
+
+    if opt_results is not None:
+        if not opt_results or rval < opt_results[-1][-1]:
+            opt_results.append( (x, H, rval) )
+
+    return rval
 
 def threshold(img):
     
@@ -269,13 +281,58 @@ def optimize_conics(conics, p0):
     x0 = np.array([0.0, 0.0])
     
     hfunc = lambda x: centered_warp(p0[0], p0[1], x[0], x[1])
+
+    opt_results = []
     
-    f = lambda x: conic_area_discrepancy(conics, hfunc(x))
-    
-    with np.errstate(divide='ignore',invalid='ignore'):
-        res = scipy.optimize.minimize(f, x0, method='Powell')
+    f = lambda x: conic_area_discrepancy(conics, x, hfunc(x), opt_results)
+
+    res = scipy.optimize.minimize(f, x0, method='Powell')
 
     H = hfunc(res.x)
+
+    rects = []
+
+    if 0:
+        
+        phi = np.linspace(0, 2*np.pi, 16, endpoint=False)
+        width, height = 0, 0
+        for x, H, fval in opt_results:
+            allxy = []
+            for conic in conics:
+                Hconic = ellipse.conic_transform(conic, H)
+                gparams = ellipse.gparams_from_conic(Hconic)
+                x, y = ellipse.gparams_evaluate(gparams, phi)
+                xy = np.dstack((x.reshape((-1, 1, 1)), y.reshape((-1, 1, 1))))
+                allxy.append(xy)
+            allxy = np.vstack(tuple(allxy)).astype(np.float32)
+            rect = cv2.boundingRect(allxy)
+            rects.append(rect)
+            x, y, w, h = rect
+            width = max(width, w)
+            height = max(height, h)
+        border = int(0.05 * min(width, height))
+        width += border
+        height += border
+        aspect = float(width)/height
+        if aspect < 2.0:
+            width = 2*height
+        else:
+            height = width/2
+        
+        for i, (rect, (x, H, fval)) in enumerate(zip(rects, opt_results)):
+            display = np.zeros((height, width), dtype=np.uint8)
+            x, y, w, h = rect
+            xoffs = width/2 - (x+w/2)
+            yoffs = height/2 - (y+h/2)
+            for conic in conics:
+                Hconic = ellipse.conic_transform(conic, H)
+                x0, y0, a, b, theta = ellipse.gparams_from_conic(Hconic)
+                cv2.ellipse(display, (int(x0+xoffs), int(y0+yoffs)), (int(a), int(b)),
+                            theta*180/np.pi, 0, 360, (255,255,255), 6, cv2.LINE_AA)
+            cv2.putText(display, 'Area discrepancy: {:.3f}'.format(fval),
+                        (16, height-24), cv2.FONT_HERSHEY_SIMPLEX, 2.0,
+                        (255,255,255), 6, cv2.LINE_AA)
+            cv2.imwrite('frame{:04d}.png'.format(i), display)
 
     return H
 
@@ -374,6 +431,9 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=512):
         warped = cv2.warpPerspective(img, TH, (shape[1], shape[0]),
                                      borderMode=cv2.BORDER_REPLICATE)
 
+        
+        debug_show('prerotate_noline', warped)
+
         cv2.line(warped,
                  tuple(map(int, p0 - rho*bin_max*t)),
                  tuple(map(int, p0 + rho*bin_max*t)),
@@ -390,14 +450,33 @@ def orientation_detect(img, contours, H, rho=8.0, ntheta=512):
 
 def skew_detect(img, contours, RH):
 
-    pts = np.vstack(tuple([cv2.convexHull(c) for c in contours]))
+    hulls = [cv2.convexHull(c) for c in contours]
+    pts = np.vstack(tuple(hulls))
 
+    
+
+    display, TRH = warp_containing_points(img, pts, RH)
+
+    for h in hulls:
+        h = cv2.perspectiveTransform(h, TRH).astype(int)
+        cv2.drawContours(display, [h], 0, (255, 0, 255), 6, cv2.LINE_AA)
+
+    debug_show('convex_hulls_before', display)
+    
     f = lambda x: skewed_widths(contours, np.dot(slant(x), RH))
 
     res = scipy.optimize.minimize_scalar(f, (-2.0, 0.0, 2.0))
 
     SRH = np.dot(slant(res.x), RH)
     warped, Hfinal = warp_containing_points(img, pts, SRH)
+
+    display = warped.copy()
+
+    for h in hulls:
+        h = cv2.perspectiveTransform(h, Hfinal).astype(int)
+        cv2.drawContours(display, [h], 0, (255, 0, 255), 6, cv2.LINE_AA)
+
+    debug_show('convex_hulls_after', display)
 
     debug_show('final', warped)
 
