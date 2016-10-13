@@ -13,4 +13,4 @@ Perspective recovery of text using transformed ellipses. See full writeup at <ht
 
 Try running
 
-    python unproject_text.py deskew0.png
+    python unproject_text.py deskew0.jpg
