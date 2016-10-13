@@ -1,5 +1,5 @@
 # unproject_text
-Rectification of text with conic sections
+Perspective recovery of text using transformed ellipses. See full writeup at <https://mzucker.github.io/2016/10/11/unprojecting-text-with-ellipses.html>
 
 # Requirements
 
