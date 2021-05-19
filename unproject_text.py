@@ -131,7 +131,7 @@ def get_contours(img):
 
     debug_show('threshold', work)
 
-    _, contours, hierarchy = cv2.findContours(work, cv2.RETR_CCOMP,
+    contours, hierarchy = cv2.findContours(work, cv2.RETR_CCOMP,
                                               cv2.CHAIN_APPROX_NONE)
 
     return contours, hierarchy
